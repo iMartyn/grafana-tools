@@ -12,6 +12,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import urllib
 import urllib2
 
 
@@ -37,6 +38,29 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     logger.addHandler(syslog_handler)
   except Exception:
     logging.info('Could not set syslog logging handler')
+
+
+  #urllib2.install_opener(urllib2.build_opener(urllib2.HTTPHandler(debuglevel=1)))
+
+
+  def search(url, params):
+    search_url = '%s?%s' %  (url, urllib.urlencode(params))
+    try:
+      response = urllib2.urlopen(search_url, timeout=5)
+    except urllib2.URLError as e:
+      if debug:
+        logger.critical('Failed accessing: %s %s\n' % (search_url, e.read()))
+      logger.critical(e)
+      sys.exit(1)
+
+    return json.load(response)
+
+  def scan():
+    return search(dashboards_url, {'search_type': 'scan', 'scroll': scroll_time})
+
+  def scroll(scroll_id):
+    url = '%s/%s' % (scroll_url, scroll_id)
+    return search(url, {'scroll': scroll_time})
   
   def cam_case_convert(name):
     '''strips spaces and replace CamCasing.cam with cam_casing_cam'''
@@ -46,56 +70,52 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
   
   # Conveniance vars
-  dashboards_url = 'http://%s:%s/grafana-dash/dashboard/_search' % (elastic_host,
-  elastic_port)
-  work_tmp_dir = tempfile.mkdtemp()
-  utc_datetime = datetime.datetime.utcnow()
+  es_url         = 'http://%s:%s' % (elastic_host, elastic_port)
+  dashboards_url = '%s/%s' % (es_url, 'grafana-dash/dashboard/_search')
+  scroll_url     = '%s/_search/scroll' % es_url
+  scroll_time    = '1m'
+  work_tmp_dir   = tempfile.mkdtemp()
+  utc_datetime   = datetime.datetime.utcnow()
   formatted_time = utc_datetime.strftime("%Y-%m-%d-%H%MZ")
-  
-  try:
-    elastic_response = urllib2.urlopen(dashboards_url, timeout=5)
-  except urllib2.URLError as e:
-    if debug:
-      logger.critical('Failed accessing: %s \n' % dashboards_url)
-    logger.critical(e)
-    sys.exit(1)
   
   if debug:
     logger.info('Grabbing grafana dashboards from: %s \n' % dashboards_url)
-  
-  try:
-    data = json.load(elastic_response)
-    if debug:
-      print 'Elastic Search raw json:\n'
-      print '-----------------------'
-      print json.dumps(data, sort_keys = False, indent = 4)
-  except Exception as e:
-    logger.critical(e)
-    sys.exit(1)
-  
+
+  scroll_id = scan()['_scroll_id']
+
   # Create a tarball with all the dashboards and move to target dir
   
   tarball = os.path.join(work_tmp_dir, 'grafana_dashboards_backup_' +
       formatted_time + '.tar.gz')
   tar = tarfile.open(tarball, 'w:gz')
+
+  if not scroll_id:
+    raise Exception('Failed to get scroll id')
+
+  while 1:
+    data      = scroll(scroll_id)
+    hit_count = len(data['hits']['hits'])
+    scroll_id = data['_scroll_id']
+    if hit_count == 0:
+      break
+
+    try:
+      for hit in data['hits']['hits']:
+        dashboard_definition = json.loads(hit['_source']['dashboard'])
+        dashboard_file_name = os.path.join(work_tmp_dir,
+      cam_case_convert(hit['_id']) + '_' + formatted_time + '.json')
+        dashboard_file = codecs.open(dashboard_file_name, 'w', 'utf-8')
+        json.dump(dashboard_definition, dashboard_file, sort_keys = True, indent = 2,
+      ensure_ascii=False)
+        logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
+        dashboard_file.close()
+        tar.add(dashboard_file_name)
+    except Exception as e:
+      logging.critical(e)
+      sys.exit(1)
   
   try:
-    for hit in data['hits']['hits']:
-      dashboard_definition = json.loads(hit['_source']['dashboard'])
-      dashboard_file_name = os.path.join(work_tmp_dir,
-    cam_case_convert(hit['_id']) + '_' + formatted_time + '.json')
-      dashboard_file = codecs.open(dashboard_file_name, 'w', 'utf-8')
-      json.dump(dashboard_definition, dashboard_file, sort_keys = True, indent = 2,
-    ensure_ascii=False)
-      logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
-      dashboard_file.close()
-      tar.add(dashboard_file_name)
     tar.close()
-  except Exception as e:
-    logging.critical(e)
-    sys.exit(1)
-  
-  try:
     tarball_file = os.path.basename(tarball)
     tarball_dest = os.path.join(dest_dir, tarball_file)
     os.rename(tarball,tarball_dest)
