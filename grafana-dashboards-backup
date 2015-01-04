@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import optparse
 import os
+import codecs
 import re
 import shutil
 import sys
@@ -83,7 +84,7 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
       dashboard_definition = json.loads(hit['_source']['dashboard'])
       dashboard_file_name = os.path.join(work_tmp_dir,
     cam_case_convert(hit['_id']) + '_' + formatted_time + '.json')
-      dashboard_file = open(dashboard_file_name, 'w')
+      dashboard_file = codecs.open(dashboard_file_name, 'w', 'utf-8')
       json.dump(dashboard_definition, dashboard_file, sort_keys = True, indent = 2,
     ensure_ascii=False)
       logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
