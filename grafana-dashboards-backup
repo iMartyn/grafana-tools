@@ -40,7 +40,8 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     logging.info('Could not set syslog logging handler')
 
 
-  #urllib2.install_opener(urllib2.build_opener(urllib2.HTTPHandler(debuglevel=1)))
+  if debug:
+    urllib2.install_opener(urllib2.build_opener(urllib2.HTTPHandler(debuglevel=1)))
 
 
   def search(url, params):
