@@ -6,15 +6,17 @@ import logging
 import logging.handlers
 import optparse
 import os
+import codecs
 import re
 import shutil
 import sys
 import tarfile
 import tempfile
+import urllib
 import urllib2
 
 
-def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False):
+def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, es_index_name, debug):
   '''Saves all Grafana dashboards stored in Elasticsearch in a tarball
   
      Uses Elasticsearch API to get all saved dashboards into a tarball, the 
@@ -36,6 +38,30 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     logger.addHandler(syslog_handler)
   except Exception:
     logging.info('Could not set syslog logging handler')
+
+
+  if debug:
+    urllib2.install_opener(urllib2.build_opener(urllib2.HTTPHandler(debuglevel=1)))
+
+
+  def search(url, params):
+    search_url = '%s?%s' %  (url, urllib.urlencode(params))
+    try:
+      response = urllib2.urlopen(search_url, timeout=5)
+    except urllib2.URLError as e:
+      if debug:
+        logger.critical('Failed accessing: %s' % search_url)
+      logger.critical(e)
+      sys.exit(1)
+
+    return json.load(response)
+
+  def scan():
+    return search(dashboards_url, {'search_type': 'scan', 'scroll': scroll_time})
+
+  def scroll(scroll_id):
+    url = '%s/%s' % (scroll_url, scroll_id)
+    return search(url, {'scroll': scroll_time})
   
   def cam_case_convert(name):
     '''strips spaces and replace CamCasing.cam with cam_casing_cam'''
@@ -43,60 +69,71 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     s1 = re.sub('([^._])([A-Z][a-z]+)', r'\1_\2', name.replace(' ',''))
     s1 = s1.replace('.','_')
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+
+  def json_dump(data,filename):
+    dump_file = codecs.open(filename, 'w', 'utf-8')
+    json.dump(data, dump_file, sort_keys = True, indent = 2, ensure_ascii=False)
+    dump_file.close()
   
   # Conveniance vars
-  dashboards_url = 'http://%s:%s/grafana-dash/dashboard/_search' % (elastic_host,
-  elastic_port)
-  work_tmp_dir = tempfile.mkdtemp()
-  utc_datetime = datetime.datetime.utcnow()
+  es_type        = 'dashboard'
+  es_url         = 'http://%s:%s' % (elastic_host, elastic_port)
+  dashboards_url = '%s/%s/%s/_search' % (es_url, es_index_name, es_type)
+  scroll_url     = '%s/_search/scroll' % es_url
+  scroll_time    = '1m'
+  work_tmp_dir   = tempfile.mkdtemp()
+  utc_datetime   = datetime.datetime.utcnow()
   formatted_time = utc_datetime.strftime("%Y-%m-%d-%H%MZ")
   
-  try:
-    elastic_response = urllib2.urlopen(dashboards_url, timeout=5)
-  except urllib2.URLError as e:
-    if debug:
-      logger.critical('Failed accessing: %s \n' % dashboards_url)
-    logger.critical(e)
-    sys.exit(1)
-  
   if debug:
-    logger.info('Grabbing grafana dashboards from: %s \n' % dashboards_url)
-  
-  try:
-    data = json.load(elastic_response)
-    if debug:
-      print 'Elastic Search raw json:\n'
-      print '-----------------------'
-      print json.dumps(data, sort_keys = False, indent = 4)
-  except Exception as e:
-    logger.critical(e)
-    sys.exit(1)
-  
+    logger.info('Grabbing grafana dashboards from: %s' % dashboards_url)
+
+  scroll_id = scan()['_scroll_id']
+
   # Create a tarball with all the dashboards and move to target dir
   
-  tarball = os.path.join(work_tmp_dir, 'grafana_dashboards_backup_' +
-      formatted_time + '.tar.gz')
-  tar = tarfile.open(tarball, 'w:gz')
+  tarball_name = '%s.%s.tar.gz' % (es_index_name, formatted_time)
+  tarball      = os.path.join(work_tmp_dir, tarball_name)
+  tar          = tarfile.open(tarball, 'w:gz')
+
+  if not scroll_id:
+    raise Exception('Failed to get scroll id')
+
+  while 1:
+    data      = scroll(scroll_id)
+    hit_count = len(data['hits']['hits'])
+    scroll_id = data['_scroll_id']
+    if hit_count == 0:
+      break
+
+    try:
+      for hit in data['hits']['hits']:
+        source               = hit['_source']
+        did                  = hit['_id']
+        dashboard_definition = json.loads(source['dashboard'])
+        dashboard_base_name  = cam_case_convert(did)
+
+        dashboard_file_name  = '%s.json' % dashboard_base_name
+        dashboard_file_path  = os.path.join(work_tmp_dir, dashboard_file_name)
+
+        json_dump(dashboard_definition, dashboard_file_path)
+        tar.add(dashboard_file_path, '%s/%s' % (es_index_name, dashboard_file_name))
+
+        metadata_file_name = '%s.metadata.json' % dashboard_base_name
+        metadata_file_path = os.path.join(work_tmp_dir, metadata_file_name)
+        source['dashboard'] = 'stored in alternate file %s' % dashboard_file_name
+        json_dump(hit, metadata_file_path)
+        tar.add(metadata_file_path, '%s/%s' % (es_index_name, metadata_file_name))
+
+        logger.info('Added %s to the dashboards backup tarball' % did)
+
+    except Exception as e:
+      logging.critical(e)
+      sys.exit(1)
   
   try:
-    for hit in data['hits']['hits']:
-      dashboard_definition = json.loads(hit['_source']['dashboard'])
-      dashboard_file_name = os.path.join(work_tmp_dir,
-    cam_case_convert(hit['_id']) + '_' + formatted_time + '.json')
-      dashboard_file = open(dashboard_file_name, 'w')
-      json.dump(dashboard_definition, dashboard_file, sort_keys = True, indent = 2,
-    ensure_ascii=False)
-      logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
-      dashboard_file.close()
-      tar.add(dashboard_file_name)
     tar.close()
-  except Exception as e:
-    logging.critical(e)
-    sys.exit(1)
-  
-  try:
-    tarball_file = os.path.basename(tarball)
-    tarball_dest = os.path.join(dest_dir, tarball_file)
+    tarball_dest = os.path.join(dest_dir, tarball_name)
     os.rename(tarball,tarball_dest)
     logger.info('New grafana dashboards backup at %s' % tarball_dest)
   except Exception as e:
@@ -136,6 +173,12 @@ def main():
     dest    = 'dest_dir',
     help    = 'The destination directory where dashboards will be saved',
     metavar = 'DEST_DIR')
+
+  parser.add_option('-i', '--index-name',
+    default = 'grafana-dash',
+    dest    = 'es_index_name',
+    help    = 'the elasticsearch index that contains the dashboards',
+    metavar = 'ELASTICSEARCH_INDEX')
   
   (options, args) = parser.parse_args()
   
@@ -147,7 +190,7 @@ def main():
   dest_dir = options.dest_dir
   debug = options.debug
 
-  grafana_dashboard_backups(elastic_host, elastic_port, dest_dir)
+  grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, options.es_index_name, debug)
 
 if __name__ == '__main__':
   main()
