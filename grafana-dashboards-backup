@@ -16,7 +16,7 @@ import urllib
 import urllib2
 
 
-def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False):
+def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, es_index_name, debug):
   '''Saves all Grafana dashboards stored in Elasticsearch in a tarball
   
      Uses Elasticsearch API to get all saved dashboards into a tarball, the 
@@ -76,7 +76,6 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     dump_file.close()
   
   # Conveniance vars
-  es_index_name  = 'grafana-dash'
   es_type        = 'dashboard'
   es_url         = 'http://%s:%s' % (elastic_host, elastic_port)
   dashboards_url = '%s/%s/%s/_search' % (es_url, es_index_name, es_type)
@@ -93,9 +92,9 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
 
   # Create a tarball with all the dashboards and move to target dir
   
-  tarball = os.path.join(work_tmp_dir, 'grafana_dashboards_backup_' +
-      formatted_time + '.tar.gz')
-  tar = tarfile.open(tarball, 'w:gz')
+  tarball_name = '%s.%s.tar.gz' % (es_index_name, formatted_time)
+  tarball      = os.path.join(work_tmp_dir, tarball_name)
+  tar          = tarfile.open(tarball, 'w:gz')
 
   if not scroll_id:
     raise Exception('Failed to get scroll id')
@@ -134,8 +133,7 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
   
   try:
     tar.close()
-    tarball_file = os.path.basename(tarball)
-    tarball_dest = os.path.join(dest_dir, tarball_file)
+    tarball_dest = os.path.join(dest_dir, tarball_name)
     os.rename(tarball,tarball_dest)
     logger.info('New grafana dashboards backup at %s' % tarball_dest)
   except Exception as e:
@@ -175,6 +173,12 @@ def main():
     dest    = 'dest_dir',
     help    = 'The destination directory where dashboards will be saved',
     metavar = 'DEST_DIR')
+
+  parser.add_option('-i', '--index-name',
+    default = 'grafana-dash',
+    dest    = 'es_index_name',
+    help    = 'the elasticsearch index that contains the dashboards',
+    metavar = 'ELASTICSEARCH_INDEX')
   
   (options, args) = parser.parse_args()
   
@@ -186,7 +190,7 @@ def main():
   dest_dir = options.dest_dir
   debug = options.debug
 
-  grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug)
+  grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, options.es_index_name, debug)
 
 if __name__ == '__main__':
   main()
