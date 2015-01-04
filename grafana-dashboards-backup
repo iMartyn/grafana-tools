@@ -50,7 +50,7 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
       response = urllib2.urlopen(search_url, timeout=5)
     except urllib2.URLError as e:
       if debug:
-        logger.critical('Failed accessing: %s %s\n' % (search_url, e.read()))
+        logger.critical('Failed accessing: %s' % search_url)
       logger.critical(e)
       sys.exit(1)
 
@@ -69,6 +69,11 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     s1 = re.sub('([^._])([A-Z][a-z]+)', r'\1_\2', name.replace(' ',''))
     s1 = s1.replace('.','_')
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+
+  def json_dump(data,filename):
+    dump_file = codecs.open(filename, 'w', 'utf-8')
+    json.dump(data, dump_file, sort_keys = True, indent = 2, ensure_ascii=False)
+    dump_file.close()
   
   # Conveniance vars
   es_index_name  = 'grafana-dash'
@@ -82,7 +87,7 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
   formatted_time = utc_datetime.strftime("%Y-%m-%d-%H%MZ")
   
   if debug:
-    logger.info('Grabbing grafana dashboards from: %s \n' % dashboards_url)
+    logger.info('Grabbing grafana dashboards from: %s' % dashboards_url)
 
   scroll_id = scan()['_scroll_id']
 
@@ -104,19 +109,25 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
 
     try:
       for hit in data['hits']['hits']:
-        dashboard_definition = json.loads(hit['_source']['dashboard'])
-        dashboard_file_name  = cam_case_convert(hit['_id']) + '_' + formatted_time + '.json'
+        source               = hit['_source']
+        did                  = hit['_id']
+        dashboard_definition = json.loads(source['dashboard'])
+        dashboard_base_name  = cam_case_convert(did)
+
+        dashboard_file_name  = '%s.json' % dashboard_base_name
         dashboard_file_path  = os.path.join(work_tmp_dir, dashboard_file_name)
-        dashboard_file       = codecs.open(dashboard_file_path, 'w', 'utf-8')
-        json.dump(
-          dashboard_definition,
-          dashboard_file,
-          sort_keys = True,
-          indent = 2,
-          ensure_ascii=False)
-        dashboard_file.close()
+
+        json_dump(dashboard_definition, dashboard_file_path)
         tar.add(dashboard_file_path, '%s/%s' % (es_index_name, dashboard_file_name))
-        logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
+
+        metadata_file_name = '%s.metadata.json' % dashboard_base_name
+        metadata_file_path = os.path.join(work_tmp_dir, metadata_file_name)
+        source['dashboard'] = 'stored in alternate file %s' % dashboard_file_name
+        json_dump(hit, metadata_file_path)
+        tar.add(metadata_file_path, '%s/%s' % (es_index_name, metadata_file_name))
+
+        logger.info('Added %s to the dashboards backup tarball' % did)
+
     except Exception as e:
       logging.critical(e)
       sys.exit(1)
