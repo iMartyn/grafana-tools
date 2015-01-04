@@ -71,8 +71,10 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
   
   # Conveniance vars
+  es_index_name  = 'grafana-dash'
+  es_type        = 'dashboard'
   es_url         = 'http://%s:%s' % (elastic_host, elastic_port)
-  dashboards_url = '%s/%s' % (es_url, 'grafana-dash/dashboard/_search')
+  dashboards_url = '%s/%s/%s/_search' % (es_url, es_index_name, es_type)
   scroll_url     = '%s/_search/scroll' % es_url
   scroll_time    = '1m'
   work_tmp_dir   = tempfile.mkdtemp()
@@ -103,14 +105,18 @@ def grafana_dashboard_backups(elastic_host, elastic_port, dest_dir, debug=False)
     try:
       for hit in data['hits']['hits']:
         dashboard_definition = json.loads(hit['_source']['dashboard'])
-        dashboard_file_name = os.path.join(work_tmp_dir,
-      cam_case_convert(hit['_id']) + '_' + formatted_time + '.json')
-        dashboard_file = codecs.open(dashboard_file_name, 'w', 'utf-8')
-        json.dump(dashboard_definition, dashboard_file, sort_keys = True, indent = 2,
-      ensure_ascii=False)
-        logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
+        dashboard_file_name  = cam_case_convert(hit['_id']) + '_' + formatted_time + '.json'
+        dashboard_file_path  = os.path.join(work_tmp_dir, dashboard_file_name)
+        dashboard_file       = codecs.open(dashboard_file_path, 'w', 'utf-8')
+        json.dump(
+          dashboard_definition,
+          dashboard_file,
+          sort_keys = True,
+          indent = 2,
+          ensure_ascii=False)
         dashboard_file.close()
-        tar.add(dashboard_file_name)
+        tar.add(dashboard_file_path, '%s/%s' % (es_index_name, dashboard_file_name))
+        logger.info('Added %s to the dashboards backup tarball' % hit['_id'])
     except Exception as e:
       logging.critical(e)
       sys.exit(1)
