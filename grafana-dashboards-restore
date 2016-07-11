@@ -1,0 +1,42 @@
+#!/bin/env python
+
+import json
+import os
+import sys
+import MySQLdb
+
+def json2sql(dashname):
+  with open(dashname+'.metadata.json') as f:
+    metaData=json.load(f)
+  with open(dashname+'.json') as f:
+    dataJson=f.read()
+    dataData=json.loads(dataJson)
+  if 'version' in dataData:
+    sys.stderr.write('Importing '+dashname+'...\n')
+  else:
+    sys.stderr.write('[ERROR] ' + dashname + ' does not contain a version, not importing!\n')
+    return ''
+  dashSlug = metaData["_id"]
+  dashTitle = metaData["_source"]["title"]
+  dashData = MySQLdb.escape_string(dataJson)
+
+  sql = """INSERT INTO `dashboard` (`version`,`slug`,`title`,`org_id`,`created`,`updated`,`updated_by`,`created_by`,`data`) \
+        VALUES({}, "{}", "{}", "1", NOW(), NOW(), NULL, NULL, "{}");""".format(
+                dataData["version"],
+                dashSlug,
+                dashTitle,
+                dashData)
+  return sql
+
+def main():
+  for fileName in os.listdir(os.getcwd()):
+    if fileName.endswith(".metadata.json"): 
+      currentDash = fileName.replace(".metadata.json","")
+      print json2sql(currentDash)
+      continue
+    else:
+      continue
+##  json2sql('welcome-to-grafana')
+
+if __name__ == '__main__':
+  main()
